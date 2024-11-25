@@ -19,7 +19,7 @@ class DQN(nn.Module):
         )
     
     def forward(self, x):
-        # Debug print
+        
         if isinstance(x, torch.Tensor):
             x = x.view(x.size(0), -1)  # Flatten any extra dimensions
         return self.network(x)
@@ -110,8 +110,6 @@ class DQNAgent:
         # Sample from replay buffer
         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
         
-        # # Debug prints
-        # print(f"States shape: {states.shape}")
         
         # Convert to tensors
         states = torch.FloatTensor(states).to(self.device)
@@ -119,10 +117,6 @@ class DQNAgent:
         actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
-        
-        # # Debug prints
-        # print(f"States tensor shape: {states.shape}")
-        # print(f"Actions tensor shape: {actions.shape}")
         
         # Compute current Q values
         current_q_values = self.policy_net(states).gather(1, actions)
@@ -149,10 +143,8 @@ def train_dqn(env, agent, n_episodes=1000, max_steps=250):
     rewards_history = []
     loss_history = []
     
-    # Debug: Check initial state shape
     initial_state = env.reset()
-    print(f"Initial state shape: {initial_state.shape}")
-    print(f"Initial state: {initial_state}")
+    
     
     for episode in range(n_episodes):
         state = env.reset()
@@ -277,14 +269,17 @@ class HopfieldDQN(nn.Module):
             # Ensure state is 2D
             if state.ndim == 1:
                 state = state.unsqueeze(0)
-            encoded = self.encoder(torch.FloatTensor(state))
-            encoded = encoded.numpy()
-            self.hopfield.store_pattern(encoded[0])  # Store the first pattern
+            encoded = self.encoder(state.to(self.encoder[0].weight.device))
+            encoded = encoded.cpu().numpy()
+            self.hopfield.store_pattern(encoded[0])
     
     def forward(self, x):
-        # Ensure input is 2D
+        device = self.encoder[0].weight.device
+        
+        # Ensure input is 2D 
         if x.ndim == 1:
             x = x.unsqueeze(0)
+        x = x.to(device)
             
         # Encode current state
         encoded = self.encoder(x)
@@ -299,7 +294,7 @@ class HopfieldDQN(nn.Module):
             retrieved.append(memory)
             
         # Stack retrieved memories and convert to tensor
-        retrieved = torch.FloatTensor(np.stack(retrieved)).to(x.device)
+        retrieved = torch.FloatTensor(np.stack(retrieved)).to(device)
         
         # Concatenate original input with retrieved memory
         combined = torch.cat([x, retrieved], dim=1)
@@ -363,6 +358,10 @@ class HopfieldDQNAgent(DQNAgent):
         else:
             return random.randrange(self.n_actions)
     
+    def store_episode(self, state):
+        """Store state in episodic memory"""
+        self.policy_net.store_episode(state)
+    
     def train_step(self):
         if len(self.memory) < self.batch_size:
             return None
@@ -379,7 +378,7 @@ class HopfieldDQNAgent(DQNAgent):
         
         # Store in episodic memory periodically
         if self.steps % self.memory_update_freq == 0:
-            self.policy_net.store_episode(states[0].cpu())
+            self.store_episode(states[0])
         
         # Compute current Q values
         current_q_values = self.policy_net(states).gather(1, actions)
