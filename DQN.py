@@ -6,6 +6,7 @@ from collections import deque
 import random
 import matplotlib.pyplot as plt
 from copy import deepcopy
+import os
 
 class DQN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
@@ -464,48 +465,119 @@ def plot_training_results(rewards, losses):
     
     plt.tight_layout()
     plt.show()
+    
+def save_rewards(rewards, base_path, run_title, seed, worker):
+    """Save rewards for a specific run and worker"""
+    run_dir = os.path.join(base_path, f"{run_title}_{seed}")
+    os.makedirs(run_dir, exist_ok=True)
+    np.save(os.path.join(run_dir, f"rewards_{worker}.npy"), rewards)
+
+def train_dqn_multi_seed(env_class, agent_class, n_seeds=8, n_workers=8, base_path="ckpt", run_title="Harlow_DQN"):
+    for seed in range(1, n_seeds+1):
+        print(f"Training seed {seed}")
+        for worker in range(n_workers):
+            # Set seeds
+            torch.manual_seed(seed * 100 + worker)
+            np.random.seed(seed * 100 + worker)
+            
+            # Initialize environment and agent
+            env = env_class(verbose=False)
+            agent = agent_class(
+                state_size=env.reset().size,
+                n_actions=2
+            )
+            
+            # Train and collect rewards
+            rewards_history, _ = train_dqn(env, agent, n_episodes=2500)
+            
+            # Save rewards
+            save_rewards(rewards_history, base_path, run_title, seed, worker)
+
+def plot_training_results(base_path, run_title, n_seeds=8, n_workers=8):
+    all_rewards = []
+    for seed in range(1, n_seeds+1):
+        run = run_title + f"_{seed}"
+        run_rewards = []
+        for worker in range(n_workers):
+            path = os.path.join(base_path, run, f"rewards_{worker}.npy")
+            if os.path.exists(path):
+                rewards = np.load(path)
+                run_rewards += [rewards[:2500]]
+        all_rewards += [np.array(run_rewards).mean(axis=0)]
+    
+    all_rewards = np.stack(all_rewards)
+    quantiles = [0, 500, 1000, 1500, 2000, 2500]
+    n_quantiles = len(quantiles)-1
+    n_trials = all_rewards.shape[2]
+    
+    plt.figure(figsize=(10, 6))
+    for i in range(n_quantiles):
+        line = []
+        stds = []
+        for j in range(n_trials):
+            q = all_rewards[:,quantiles[i]:quantiles[i+1],j]
+            performance = q.mean(axis=1)
+            line += [performance.mean()*100]
+            stds += [(performance.std()*100)]
+        plt.errorbar(np.arange(1,7), line, fmt='o-', yerr=stds)
+    
+    plt.plot([1,6], [50,50], '--')
+    plt.xlabel("Trial")
+    plt.ylabel("Performance (%)")
+    plt.legend(["Random", "1st", "2nd", "3rd", "4th", "Final"], title="Training Quantile")
+    plt.title("Harlow Task - DQN Performance")
+    plt.show()
 
 if __name__ == "__main__":
     from harlow_task import Harlow_1D
     
-    # # Initialize environment
-    # env = Harlow_1D(verbose=False)
-    # initial_state = env.reset()
-    # print(f"Initial state shape from environment: {initial_state.shape}")
+    # Train multiple seeds
+    train_dqn_multi_seed(Harlow_1D, DQNAgent)
     
-    # # Initialize agent with correct state size
-    # agent = DQNAgent(
-    #     state_size=initial_state.size,  # Use the actual size of the flattened state
-    #     n_actions=2,   # Left or right
-    #     hidden_size=128,
-    #     learning_rate=1e-3,
-    #     gamma=0.99,
-    #     epsilon_start=1.0,
-    #     epsilon_end=0.01,
-    #     epsilon_decay=0.995,
-    #     buffer_size=10000,
-    #     batch_size=64,
-    #     target_update=10
-    # )
-    
-    # # Train the agent
-    # rewards, losses = train_dqn(env, agent, n_episodes=5000)
-    
-    
-    # Initialize environment
-    env = Harlow_1D(verbose=False)
-    initial_state = env.reset()
-
-    # Initialize Hopfield-DQN agent
-    agent = HopfieldDQNAgent(
-        state_size=initial_state.size,
-        n_actions=2,
-        hidden_size=128,
-        episodic_size=64,  # Size of patterns stored in Hopfield network
-        memory_update_freq=5  # How often to store new patterns
-    )
-
-    # Train the agent
-    rewards, losses = train_hopfield_dqn(env, agent, n_episodes=1000)
     # Plot results
-    plot_training_results(rewards, losses)
+    plot_training_results("ckpt", "Harlow_DQN")
+
+# if __name__ == "__main__":
+#     from harlow_task import Harlow_1D
+    
+#     # # Initialize environment
+#     # env = Harlow_1D(verbose=False)
+#     # initial_state = env.reset()
+#     # print(f"Initial state shape from environment: {initial_state.shape}")
+    
+#     # # Initialize agent with correct state size
+#     # agent = DQNAgent(
+#     #     state_size=initial_state.size,  # Use the actual size of the flattened state
+#     #     n_actions=2,   # Left or right
+#     #     hidden_size=128,
+#     #     learning_rate=1e-3,
+#     #     gamma=0.99,
+#     #     epsilon_start=1.0,
+#     #     epsilon_end=0.01,
+#     #     epsilon_decay=0.995,
+#     #     buffer_size=10000,
+#     #     batch_size=64,
+#     #     target_update=10
+#     # )
+    
+#     # # Train the agent
+#     # rewards, losses = train_dqn(env, agent, n_episodes=5000)
+    
+    
+#     # Initialize environment
+#     env = Harlow_1D(verbose=False)
+#     initial_state = env.reset()
+
+#     # Initialize Hopfield-DQN agent
+#     agent = HopfieldDQNAgent(
+#         state_size=initial_state.size,
+#         n_actions=2,
+#         hidden_size=128,
+#         episodic_size=64,  # Size of patterns stored in Hopfield network
+#         memory_update_freq=5  # How often to store new patterns
+#     )
+
+#     # Train the agent
+#     rewards, losses = train_hopfield_dqn(env, agent, n_episodes=1000)
+#     # Plot results
+#     plot_training_results(rewards, losses)
