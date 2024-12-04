@@ -8,22 +8,7 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 import os
 
-class DQN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(DQN, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, output_size)
-        )
-    
-    def forward(self, x):
-        
-        if isinstance(x, torch.Tensor):
-            x = x.view(x.size(0), -1)  # Flatten any extra dimensions
-        return self.network(x)
+from harlow_task import Harlow_1D
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -51,11 +36,27 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
+class DQN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size=2):  # output_size=2 for binary object choice
+        super(DQN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size)  # outputs Q-values for selecting object 1 or object 2
+        )
+    
+    def forward(self, x):
+        if isinstance(x, torch.Tensor):
+            x = x.view(x.size(0), -1)
+        return self.network(x)
+
 class DQNAgent:
     def __init__(
         self,
         state_size,
-        n_actions,
+        n_actions = 2,
         hidden_size=128,
         learning_rate=1e-3,
         gamma=0.99,
@@ -69,10 +70,8 @@ class DQNAgent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.state_size = state_size
         
-        print(f"Initializing DQN with state_size={state_size}")
-        
-        # Networks
-        self.policy_net = DQN(state_size, hidden_size, n_actions).to(self.device)
+        # Networks - output size is 2 for binary object choice
+        self.policy_net = DQN(state_size, hidden_size, 2).to(self.device)
         self.target_net = deepcopy(self.policy_net)
         self.target_net.eval()
         
@@ -88,18 +87,39 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         
         # Other parameters
-        self.n_actions = n_actions
+        self.n_actions = n_actions 
         self.target_update = target_update
         self.steps = 0
+        
+        # Track object positions
+        self.left_obj = None
+        self.right_obj = None
+    
+    def update_object_positions(self, state):
+        """Update knowledge of which object is on which side"""
+        center = len(state) // 2
+        offset = 3  # from the original environment
+        
+        self.left_obj = state[center - offset]
+        self.right_obj = state[center + offset]
     
     def select_action(self, state):
+        # Update object positions
+        self.update_object_positions(state)
+        
         if random.random() > self.epsilon:
             with torch.no_grad():
                 state = torch.FloatTensor(state.flatten()).unsqueeze(0).to(self.device)
                 q_values = self.policy_net(state)
-                return q_values.argmax().item()
+                object_choice = q_values.argmax().item()  # 0 for first object, 1 for second object
+                
+                # Convert object choice to movement direction
+                if object_choice == 0:  # Choose first object
+                    return 0 if self.left_obj > 0 else 1  # go left if object is on left, right if on right
+                else:  # Choose second object
+                    return 0 if self.right_obj > 0 else 1  # go left if object is on left, right if on right
         else:
-            return random.randrange(self.n_actions)
+            return random.randrange(2)  # Still return 0 or 1 for left/right movement
     
     def update_epsilon(self):
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
@@ -111,7 +131,6 @@ class DQNAgent:
         # Sample from replay buffer
         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
         
-        
         # Convert to tensors
         states = torch.FloatTensor(states).to(self.device)
         next_states = torch.FloatTensor(next_states).to(self.device)
@@ -119,8 +138,25 @@ class DQNAgent:
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
         
-        # Compute current Q values
-        current_q_values = self.policy_net(states).gather(1, actions)
+        # Convert movement actions to object choices for Q-learning
+        object_choices = []
+        for i, state in enumerate(states):
+            center = len(state) // 2
+            offset = 3
+            left_obj = state[center - offset].item()
+            right_obj = state[center + offset].item()
+            
+            # Determine which object was chosen based on the movement action
+            if actions[i] == 0:  # went left
+                chosen_obj = 0 if left_obj > 0 else 1
+            else:  # went right
+                chosen_obj = 0 if right_obj > 0 else 1
+            object_choices.append(chosen_obj)
+        
+        object_choices = torch.LongTensor(object_choices).unsqueeze(1).to(self.device)
+        
+        # Compute current Q values for object choices
+        current_q_values = self.policy_net(states).gather(1, object_choices)
         
         # Compute target Q values
         with torch.no_grad():
@@ -240,9 +276,9 @@ class HopfieldNetwork:
         similarities = [np.dot(probe, mem) for mem in self.memories]
         closest_idx = np.argmax(similarities)
         return np.where(self.memories[closest_idx] > 0, 1, 0)
-
+    
 class HopfieldDQN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, episodic_size=64):
+    def __init__(self, input_size, hidden_size, output_size=2, episodic_size=64):
         super(HopfieldDQN, self).__init__()
         
         self.episodic_size = episodic_size
@@ -255,29 +291,26 @@ class HopfieldDQN(nn.Module):
             nn.Linear(hidden_size, episodic_size)
         )
         
-        # Main DQN network
+        # Main DQN network - now outputs Q-values for object selection
         self.network = nn.Sequential(
             nn.Linear(input_size + episodic_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, output_size)
+            nn.Linear(hidden_size, output_size)  # outputs Q-values for selecting object 1 or 2
         )
     
     def store_episode(self, state):
         """Store state pattern in episodic memory"""
         with torch.no_grad():
-            # Ensure state is 2D
             if state.ndim == 1:
                 state = state.unsqueeze(0)
             encoded = self.encoder(state.to(self.encoder[0].weight.device))
-            encoded = encoded.cpu().numpy()
-            self.hopfield.store_pattern(encoded[0])
+            self.hopfield.store_pattern(encoded[0].cpu().numpy())
     
     def forward(self, x):
         device = self.encoder[0].weight.device
         
-        # Ensure input is 2D 
         if x.ndim == 1:
             x = x.unsqueeze(0)
         x = x.to(device)
@@ -285,29 +318,27 @@ class HopfieldDQN(nn.Module):
         # Encode current state
         encoded = self.encoder(x)
         
-        # Process each sample in the batch
+        # Process each sample in batch
         batch_size = x.size(0)
         retrieved = []
         
         for i in range(batch_size):
-            # Get memory for each sample
-            memory = self.hopfield.get_closest_memory(encoded[i].detach().cpu().numpy())
+            memory = self.hopfield.retrieve_pattern(encoded[i].detach().cpu().numpy())
             retrieved.append(memory)
             
-        # Stack retrieved memories and convert to tensor
         retrieved = torch.FloatTensor(np.stack(retrieved)).to(device)
         
         # Concatenate original input with retrieved memory
         combined = torch.cat([x, retrieved], dim=1)
         
-        # Process through main network
+        # Process through main network to get object selection Q-values
         return self.network(combined)
 
 class HopfieldDQNAgent(DQNAgent):
     def __init__(
         self,
         state_size,
-        n_actions,
+        n_actions=2,
         hidden_size=128,
         episodic_size=64,
         learning_rate=1e-3,
@@ -325,10 +356,10 @@ class HopfieldDQNAgent(DQNAgent):
         
         # Networks
         self.policy_net = HopfieldDQN(
-            state_size, 
-            hidden_size, 
-            n_actions, 
-            episodic_size
+            input_size=state_size,
+            hidden_size=hidden_size,
+            output_size=2,  # binary object choice
+            episodic_size=episodic_size
         ).to(self.device)
         self.target_net = deepcopy(self.policy_net)
         self.target_net.eval()
@@ -349,19 +380,40 @@ class HopfieldDQNAgent(DQNAgent):
         self.target_update = target_update
         self.memory_update_freq = memory_update_freq
         self.steps = 0
+        
+        # Track object positions
+        self.left_obj = None
+        self.right_obj = None
+    
+    def update_object_positions(self, state):
+        """Update knowledge of which object is on which side"""
+        center = len(state) // 2
+        offset = 3  # from the original environment
+        
+        self.left_obj = state[center - offset]
+        self.right_obj = state[center + offset]
     
     def select_action(self, state):
+        # Update object positions
+        self.update_object_positions(state)
+        
         if random.random() > self.epsilon:
             with torch.no_grad():
                 state = torch.FloatTensor(state.flatten()).to(self.device)
                 q_values = self.policy_net(state)
-                return q_values.argmax().item()
+                object_choice = q_values.argmax().item()  # 0 for first object, 1 for second object
+                
+                # Convert object choice to movement direction
+                if object_choice == 0:  # Choose first object
+                    return 0 if self.left_obj > 0 else 1  # go left if object is on left, right if on right
+                else:  # Choose second object
+                    return 0 if self.right_obj > 0 else 1  # go left if object is on left, right if on right
         else:
-            return random.randrange(self.n_actions)
+            return random.randrange(2)
     
     def store_episode(self, state):
         """Store state in episodic memory"""
-        self.policy_net.store_episode(state)
+        self.policy_net.store_episode(torch.FloatTensor(state))
     
     def train_step(self):
         if len(self.memory) < self.batch_size:
@@ -381,8 +433,25 @@ class HopfieldDQNAgent(DQNAgent):
         if self.steps % self.memory_update_freq == 0:
             self.store_episode(states[0])
         
-        # Compute current Q values
-        current_q_values = self.policy_net(states).gather(1, actions)
+        # Convert movement actions to object choices for Q-learning
+        object_choices = []
+        for i, state in enumerate(states):
+            center = len(state) // 2
+            offset = 3
+            left_obj = state[center - offset].item()
+            right_obj = state[center + offset].item()
+            
+            # Determine which object was chosen based on the movement action
+            if actions[i] == 0:  # went left
+                chosen_obj = 0 if left_obj > 0 else 1
+            else:  # went right
+                chosen_obj = 0 if right_obj > 0 else 1
+            object_choices.append(chosen_obj)
+        
+        object_choices = torch.LongTensor(object_choices).unsqueeze(1).to(self.device)
+        
+        # Compute current Q values for object choices
+        current_q_values = self.policy_net(states).gather(1, object_choices)
         
         # Compute target Q values
         with torch.no_grad():
@@ -401,51 +470,6 @@ class HopfieldDQNAgent(DQNAgent):
             self.target_net.load_state_dict(self.policy_net.state_dict())
         
         return loss.item()
-
-def train_hopfield_dqn(env, agent, n_episodes=1000, max_steps=250):
-    rewards_history = []
-    loss_history = []
-    
-    for episode in range(n_episodes):
-        state = env.reset()
-        total_reward = 0
-        episode_losses = []
-        
-        for step in range(max_steps):
-            # Select and perform action
-            action = agent.select_action(state)
-            next_state, reward, done, _ = env.step(action)
-            total_reward += reward
-            
-            # Store transition and train
-            agent.memory.push(state, action, reward, next_state, done)
-            loss = agent.train_step()
-            if loss is not None:
-                episode_losses.append(loss)
-            
-            state = next_state
-            
-            if done:
-                break
-        
-        # Update exploration rate
-        agent.update_epsilon()
-        
-        # Record metrics
-        rewards_history.append(total_reward)
-        if episode_losses:
-            loss_history.append(np.mean(episode_losses))
-        
-        # Print progress
-        if (episode + 1) % 10 == 0:
-            avg_reward = np.mean(rewards_history[-10:])
-            avg_loss = np.mean(loss_history[-10:]) if loss_history else 0
-            print(f"Episode {episode + 1}")
-            print(f"Average Reward (last 10): {avg_reward:.2f}")
-            print(f"Average Loss (last 10): {avg_loss:.4f}")
-            print(f"Epsilon: {agent.epsilon:.3f}\n")
-    
-    return rewards_history, loss_history
 
 def plot_training_results(rewards, losses):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
@@ -528,56 +552,46 @@ def plot_training_results(base_path, run_title, n_seeds=8, n_workers=8):
     plt.title("Harlow Task - DQN Performance")
     plt.show()
 
-if __name__ == "__main__":
-    from harlow_task import Harlow_1D
-    
-    # Train multiple seeds
-    train_dqn_multi_seed(Harlow_1D, DQNAgent)
-    
-    # Plot results
-    plot_training_results("ckpt", "Harlow_DQN")
-
 # if __name__ == "__main__":
 #     from harlow_task import Harlow_1D
     
-#     # # Initialize environment
-#     # env = Harlow_1D(verbose=False)
-#     # initial_state = env.reset()
-#     # print(f"Initial state shape from environment: {initial_state.shape}")
+#     # Train multiple seeds
+#     train_dqn_multi_seed(Harlow_1D, DQNAgent)
     
-#     # # Initialize agent with correct state size
-#     # agent = DQNAgent(
-#     #     state_size=initial_state.size,  # Use the actual size of the flattened state
-#     #     n_actions=2,   # Left or right
-#     #     hidden_size=128,
-#     #     learning_rate=1e-3,
-#     #     gamma=0.99,
-#     #     epsilon_start=1.0,
-#     #     epsilon_end=0.01,
-#     #     epsilon_decay=0.995,
-#     #     buffer_size=10000,
-#     #     batch_size=64,
-#     #     target_update=10
-#     # )
-    
-#     # # Train the agent
-#     # rewards, losses = train_dqn(env, agent, n_episodes=5000)
-    
-    
-#     # Initialize environment
-#     env = Harlow_1D(verbose=False)
-#     initial_state = env.reset()
-
-#     # Initialize Hopfield-DQN agent
-#     agent = HopfieldDQNAgent(
-#         state_size=initial_state.size,
-#         n_actions=2,
-#         hidden_size=128,
-#         episodic_size=64,  # Size of patterns stored in Hopfield network
-#         memory_update_freq=5  # How often to store new patterns
-#     )
-
-#     # Train the agent
-#     rewards, losses = train_hopfield_dqn(env, agent, n_episodes=1000)
 #     # Plot results
-#     plot_training_results(rewards, losses)
+#     plot_training_results("ckpt", "Harlow_DQN")
+
+if __name__ == "__main__":
+#     from harlow_task import Harlow_1D
+    
+    # # Initialize environment
+    env = Harlow_1D(verbose=False)
+    initial_state = env.reset()
+    print(f"Initial state shape from environment: {initial_state.shape}")
+    
+    # # Initialize agent with correct state size
+    # agent = DQNAgent(
+    #     state_size=initial_state.size,  # Use the actual size of the flattened state
+    #     n_actions=2,   # Left or right
+    #     hidden_size=128,
+    #     learning_rate=1e-3,
+    #     gamma=0.99,
+    #     epsilon_start=1.0,
+    #     epsilon_end=0.01,
+    #     epsilon_decay=0.995,
+    #     buffer_size=10000,
+    #     batch_size=64,
+    #     target_update=10
+    # )
+    # rewards, losses = train_dqn(env, agent, n_episodes=2500)
+    
+    # # Initialize Hopfield-DQN agent
+    agent = HopfieldDQNAgent(
+        state_size=initial_state.size,
+        n_actions=2,
+        hidden_size=128,
+        episodic_size=64,  # Size of patterns stored in Hopfield network
+        memory_update_freq=5  # How often to store new patterns
+    )
+    rewards, losses = train_hopfield_dqn(env, agent, n_episodes=1000)
+   
